@@ -1,12 +1,11 @@
 import typer
-from rich import print
+from src.core.engine import AssessmentEngine
 
-app = typer.Typer(help="MPIV TVM Advisor Platform")
+app = typer.Typer()
+
 
 @app.command()
 def run():
-    """
-    Run a new assessment (simulation mode).
-    """
-    print("[bold green]Starting MPIV Assessment Engine...[/bold green]")
-    print("Simulation mode active. No Tenable connection yet.")
+    """Execute MPIV Assessment"""
+    engine = AssessmentEngine()
+    engine.run()
