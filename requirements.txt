@@ -1,0 +1,5 @@
+python-dotenv
+rich
+pandas
+fpdf2
+typer
