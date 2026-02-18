@@ -1,5 +1,31 @@
+# Virtual Environments
 .venv/
-.env
+.ven/
+venv/
+env/
+
+# Python
 __pycache__/
-*.pyc
-reports/
+*.py[cod]
+*.egg-info/
+
+# Credentials - NUNCA al repo
+.env
+*.key
+*.pem
+
+# Reports - datos de clientes
+reports/*.pdf
+reports/*.csv
+reports/*.json
+
+# Logs
+*.log
+logs/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
