@@ -99,25 +99,52 @@ class GapAnalyzer:
             )
 
     def _check_scan_frequency(self):
+        """
+        Solo evalúa scans activos (enabled=True o con status reciente).
+        Ignora scans históricos/archivados para evitar falsos positivos.
+        """
         now = datetime.now(timezone.utc)
         stale = []
+
         for scan in self.scans:
+            # Ignorar scans deshabilitados o sin nombre
+            if not scan.get("name"):
+                continue
+            # Si tiene campo enabled=False, es un scan inactivo — ignorar
+            if scan.get("enabled") is False:
+                continue
+
             last_run = scan.get("last_run")
             if not last_run:
                 stale.append(scan["name"])
                 continue
-            last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            if (now - last_dt).days > 30:
-                stale.append(scan["name"])
+
+            try:
+                last_dt = datetime.fromisoformat(
+                    last_run.replace("Z", "+00:00")
+                )
+                if (now - last_dt).days > 30:
+                    stale.append(scan["name"])
+            except (ValueError, TypeError):
+                stale.append(scan.get("name", "unknown"))
+
         if stale:
+            # Cap en 20 para el finding — si hay cientos es tema de arquitectura
+            sample = stale[:5]
             self._add(
                 title=f"{len(stale)} Scan(s) Not Run in 30+ Days",
                 category=FindingCategory.SCAN_POLICY,
-                severity=Severity.HIGH,
-                description="Stale scans leave assets unassessed.",
-                evidence=str(stale),
-                recommendation="Implement automated weekly scan schedules.",
-                effort="low"
+                severity=Severity.CRITICAL if len(stale) > 100 else Severity.HIGH,
+                description=(
+                    f"{len(stale)} scans have not executed in the last 30 days. "
+                    "This may indicate scheduling issues or abandoned scan configurations."
+                ),
+                evidence=f"Sample: {sample} {'(+ more)' if len(stale) > 5 else ''}",
+                recommendation=(
+                    "Review and clean up abandoned scans. Enable weekly schedules "
+                    "for all active scan policies."
+                ),
+                effort="medium"
             )
 
     def _add(self, title, category, severity, description,
