@@ -1,3 +1,4 @@
+import os
 import click
 from rich.console import Console
 from rich.table import Table
@@ -7,6 +8,8 @@ from rich import box
 from config.settings import settings
 
 console = Console()
+
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'mpiv_logo.png')
 
 
 def banner():
@@ -115,7 +118,10 @@ def run_assessment(no_pdf, verbose):
     if not no_pdf:
         console.print("\n[bold]Generating PDF report...[/bold]")
         try:
-            pdf_path = PDFReportGenerator(summary).generate()
+            logo = LOGO_PATH if os.path.exists(LOGO_PATH) else None
+            if not logo:
+                console.print("  [yellow]⚠  Logo not found at assets/mpiv_logo.png — generating without logo[/yellow]")
+            pdf_path = PDFReportGenerator(summary, logo_path=logo).generate()
             console.print(f"\n[green]✔ Report saved:[/green] {pdf_path}\n")
         except Exception as e:
             console.print(f"\n[red]✘ PDF generation failed:[/red] {e}\n")
@@ -144,6 +150,10 @@ def check_status():
                     "Set OPENAI_API_KEY in .env")
 
     tbl.add_row("Report Output", "[green]OK[/green]", str(settings.REPORT_OUTPUT_DIR))
+
+    logo_status = "[green]OK[/green]" if os.path.exists(LOGO_PATH) else "[yellow]NOT FOUND[/yellow]"
+    tbl.add_row("MPIV Logo", logo_status, "assets/mpiv_logo.png")
+
     mode_label = "MOCK (safe)" if settings.MOCK_MODE else "LIVE (real API)"
     mode_color = "yellow" if settings.MOCK_MODE else "green"
     tbl.add_row("Current Mode", f"[{mode_color}]{mode_label}[/{mode_color}]", "")

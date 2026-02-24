@@ -2,6 +2,17 @@ from datetime import datetime, timezone
 from loguru import logger
 from models.assessment import Finding, Severity, FindingCategory
 
+
+def _truncate_evidence(items: list, max_items: int = 5) -> str:
+    """Truncate a list to max_items and add a count summary."""
+    if not items:
+        return "N/A"
+    sample = items[:max_items]
+    if len(items) > max_items:
+        return f"{', '.join(str(i) for i in sample)} (+ {len(items) - max_items} more)"
+    return ', '.join(str(i) for i in sample)
+
+
 class GapAnalyzer:
     def __init__(self, scanners, assets, scans, policies, tags):
         self.scanners = scanners
@@ -31,7 +42,7 @@ class GapAnalyzer:
                 category=FindingCategory.SCANNER_HEALTH,
                 severity=Severity.HIGH,
                 description="Offline scanners create blind spots in coverage.",
-                evidence=str([s["name"] for s in offline]),
+                evidence=_truncate_evidence([s["name"] for s in offline]),
                 recommendation="Restore offline scanners and verify connectivity.",
                 effort="medium"
             )
@@ -44,7 +55,7 @@ class GapAnalyzer:
                 category=FindingCategory.SCANNER_HEALTH,
                 severity=Severity.CRITICAL,
                 description="Unlinked scanners cannot run scans or report findings.",
-                evidence=str([s["name"] for s in unlinked]),
+                evidence=_truncate_evidence([s["name"] for s in unlinked]),
                 recommendation="Re-link scanners using a valid Linking Key from Tenable.io.",
                 effort="low"
             )
@@ -52,12 +63,17 @@ class GapAnalyzer:
     def _check_credential_coverage(self):
         unauthenticated = [s for s in self.scans if not s.get("credential_enabled")]
         if unauthenticated:
+            total = len(self.scans)
+            pct = round(len(unauthenticated) / total * 100, 1) if total else 0
             self._add(
                 title=f"{len(unauthenticated)} Scan(s) Without Credentials",
                 category=FindingCategory.CREDENTIAL_COVERAGE,
                 severity=Severity.CRITICAL,
-                description="Unauthenticated scans detect only ~30% of vulnerabilities.",
-                evidence=str([s["name"] for s in unauthenticated]),
+                description=(
+                    f"{len(unauthenticated)} of {total} scans ({pct}%) are running "
+                    "unauthenticated. Unauthenticated scans detect only ~30% of vulnerabilities."
+                ),
+                evidence=_truncate_evidence([s["name"] for s in unauthenticated], max_items=5),
                 recommendation="Configure credential sets for all internal scans.",
                 effort="high"
             )
@@ -69,9 +85,12 @@ class GapAnalyzer:
             last_seen = asset.get("last_seen")
             if not last_seen:
                 continue
-            last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-            if (now - last_dt).days > 90:
-                stale.append(asset.get("fqdn", "unknown"))
+            try:
+                last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                if (now - last_dt).days > 90:
+                    stale.append(asset.get("fqdn") or asset.get("ipv4") or "unknown")
+            except (ValueError, TypeError):
+                continue
         if stale:
             pct = round(len(stale) / len(self.assets) * 100, 1)
             self._add(
@@ -79,7 +98,7 @@ class GapAnalyzer:
                 category=FindingCategory.ASSET_COVERAGE,
                 severity=Severity.MEDIUM,
                 description="Assets not seen in 90+ days may be ghost assets or coverage gaps.",
-                evidence=f"Sample: {stale[:3]}",
+                evidence=f"Sample: {_truncate_evidence(stale, max_items=3)}",
                 recommendation="Audit stale assets and enable asset aging policy.",
                 effort="medium"
             )
@@ -99,38 +118,26 @@ class GapAnalyzer:
             )
 
     def _check_scan_frequency(self):
-        """
-        Solo evalúa scans activos (enabled=True o con status reciente).
-        Ignora scans históricos/archivados para evitar falsos positivos.
-        """
+        """Only evaluate active scans — ignore disabled or historical ones."""
         now = datetime.now(timezone.utc)
         stale = []
-
         for scan in self.scans:
-            # Ignorar scans deshabilitados o sin nombre
             if not scan.get("name"):
                 continue
-            # Si tiene campo enabled=False, es un scan inactivo — ignorar
             if scan.get("enabled") is False:
                 continue
-
             last_run = scan.get("last_run")
             if not last_run:
                 stale.append(scan["name"])
                 continue
-
             try:
-                last_dt = datetime.fromisoformat(
-                    last_run.replace("Z", "+00:00")
-                )
+                last_dt = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
                 if (now - last_dt).days > 30:
                     stale.append(scan["name"])
             except (ValueError, TypeError):
                 stale.append(scan.get("name", "unknown"))
 
         if stale:
-            # Cap en 20 para el finding — si hay cientos es tema de arquitectura
-            sample = stale[:5]
             self._add(
                 title=f"{len(stale)} Scan(s) Not Run in 30+ Days",
                 category=FindingCategory.SCAN_POLICY,
@@ -139,10 +146,10 @@ class GapAnalyzer:
                     f"{len(stale)} scans have not executed in the last 30 days. "
                     "This may indicate scheduling issues or abandoned scan configurations."
                 ),
-                evidence=f"Sample: {sample} {'(+ more)' if len(stale) > 5 else ''}",
+                evidence=f"Sample: {_truncate_evidence(stale, max_items=5)} (+ more)",
                 recommendation=(
-                    "Review and clean up abandoned scans. Enable weekly schedules "
-                    "for all active scan policies."
+                    "Review and clean up abandoned scans. "
+                    "Enable weekly schedules for all active scan policies."
                 ),
                 effort="medium"
             )
