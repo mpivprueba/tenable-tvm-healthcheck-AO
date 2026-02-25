@@ -1,33 +1,52 @@
+import re
 from datetime import datetime, timezone
 from loguru import logger
 from models.assessment import Finding, Severity, FindingCategory
 
+_UUID_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.IGNORECASE
+)
+
+def _is_readable_name(name: str) -> bool:
+    if not name or not name.strip():
+        return False
+    if _UUID_RE.match(name.strip()):
+        return False
+    return True
+
 
 def _truncate_evidence(items: list, max_items: int = 5) -> str:
-    """Truncate a list to max_items and add a count summary."""
-    if not items:
-        return "N/A"
-    sample = items[:max_items]
-    if len(items) > max_items:
-        return f"{', '.join(str(i) for i in sample)} (+ {len(items) - max_items} more)"
-    return ', '.join(str(i) for i in sample)
+    readable = [str(i) for i in items if _is_readable_name(str(i))]
+    total = len(items)
+    if not readable:
+        return f"{total} items (names not available)"
+    sample = readable[:max_items]
+    remaining = total - len(sample)
+    if remaining > 0:
+        return f"{', '.join(sample)} (+ {remaining} more)"
+    return ', '.join(sample)
 
 
 class GapAnalyzer:
-    def __init__(self, scanners, assets, scans, policies, tags):
-        self.scanners = scanners
-        self.assets = assets
-        self.scans = scans
-        self.policies = policies
-        self.tags = tags
-        self.findings = []
-        self._counter = 0
+    def __init__(self, scanners, assets, scans, policies, tags,
+                 credentials=None, networks=None):
+        self.scanners    = scanners
+        self.assets      = assets
+        self.scans       = scans
+        self.policies    = policies
+        self.tags        = tags
+        self.credentials = credentials or []
+        self.networks    = networks    or []
+        self.findings    = []
+        self._counter    = 0
 
     def run_all_checks(self):
         logger.info("Running gap analysis checks...")
         self._check_scanner_health()
         self._check_scanner_linking()
         self._check_credential_coverage()
+        self._check_credentials_configured()
+        self._check_networks()
         self._check_asset_staleness()
         self._check_asset_tagging()
         self._check_scan_frequency()
@@ -78,6 +97,87 @@ class GapAnalyzer:
                 effort="high"
             )
 
+    # ✅ NUEVO — Verifica si hay credenciales configuradas en el tenant
+    def _check_credentials_configured(self):
+        if not self.credentials:
+            self._add(
+                title="No Shared Credentials Configured",
+                category=FindingCategory.CREDENTIAL_COVERAGE,
+                severity=Severity.HIGH,
+                description=(
+                    "No shared credentials are configured in the tenant. "
+                    "Without shared credentials, each scan requires individual "
+                    "credential configuration, increasing operational overhead."
+                ),
+                evidence="0 credential sets found via credentials API.",
+                recommendation=(
+                    "Configure at least one Windows (domain) and one SSH credential set. "
+                    "Enable Shared Credentials so all scans can inherit them automatically."
+                ),
+                effort="medium"
+            )
+        else:
+            types = list({c.get("type", "Unknown") for c in self.credentials})
+            has_windows = any("windows" in c.get("type","").lower() for c in self.credentials)
+            has_ssh     = any("ssh" in c.get("type","").lower() for c in self.credentials)
+            missing = []
+            if not has_windows:
+                missing.append("Windows")
+            if not has_ssh:
+                missing.append("SSH/Linux")
+            if missing:
+                self._add(
+                    title=f"Missing Credential Types: {', '.join(missing)}",
+                    category=FindingCategory.CREDENTIAL_COVERAGE,
+                    severity=Severity.MEDIUM,
+                    description=(
+                        f"Credential types {missing} are not configured. "
+                        f"Only {types} credentials found ({len(self.credentials)} total). "
+                        "Incomplete credential coverage reduces vulnerability detection."
+                    ),
+                    evidence=f"{len(self.credentials)} credential set(s): {', '.join(types)}",
+                    recommendation=f"Add {' and '.join(missing)} credential sets to cover all OS types.",
+                    effort="medium"
+                )
+
+    # ✅ NUEVO — Verifica configuración de redes
+    def _check_networks(self):
+        if not self.networks:
+            return
+        default_only = all(n.get("is_default", False) for n in self.networks)
+        empty_networks = [n for n in self.networks if n.get("asset_count", 0) == 0
+                         and not n.get("is_default")]
+        if default_only and len(self.networks) == 1:
+            self._add(
+                title="Only Default Network Configured",
+                category=FindingCategory.ASSET_COVERAGE,
+                severity=Severity.MEDIUM,
+                description=(
+                    "Only the Default network is configured. Separate networks improve "
+                    "asset segmentation, scanner assignment, and access control."
+                ),
+                evidence="1 network found: Default (is_default=True).",
+                recommendation=(
+                    "Create dedicated networks per segment (e.g., HQ, DMZ, Cloud). "
+                    "Assign specific scanners to each network for better coverage."
+                ),
+                effort="medium"
+            )
+        elif empty_networks:
+            names = _truncate_evidence([n["name"] for n in empty_networks])
+            self._add(
+                title=f"{len(empty_networks)} Network(s) With No Assets",
+                category=FindingCategory.ASSET_COVERAGE,
+                severity=Severity.LOW,
+                description=(
+                    f"{len(empty_networks)} configured network(s) have no assets assigned. "
+                    "Empty networks may indicate misconfiguration or abandoned segments."
+                ),
+                evidence=f"Empty networks: {names}",
+                recommendation="Review and clean up empty networks or assign assets.",
+                effort="low"
+            )
+
     def _check_asset_staleness(self):
         now = datetime.now(timezone.utc)
         stale = []
@@ -88,7 +188,10 @@ class GapAnalyzer:
             try:
                 last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
                 if (now - last_dt).days > 90:
-                    stale.append(asset.get("fqdn") or asset.get("ipv4") or "unknown")
+                    name = (asset.get("fqdn") or
+                            asset.get("hostname") or
+                            asset.get("ipv4") or "unknown")
+                    stale.append(name)
             except (ValueError, TypeError):
                 continue
         if stale:
@@ -118,7 +221,6 @@ class GapAnalyzer:
             )
 
     def _check_scan_frequency(self):
-        """Only evaluate active scans — ignore disabled or historical ones."""
         now = datetime.now(timezone.utc)
         stale = []
         for scan in self.scans:
@@ -146,7 +248,7 @@ class GapAnalyzer:
                     f"{len(stale)} scans have not executed in the last 30 days. "
                     "This may indicate scheduling issues or abandoned scan configurations."
                 ),
-                evidence=f"Sample: {_truncate_evidence(stale, max_items=5)} (+ more)",
+                evidence=f"Sample: {_truncate_evidence(stale, max_items=5)}",
                 recommendation=(
                     "Review and clean up abandoned scans. "
                     "Enable weekly schedules for all active scan policies."

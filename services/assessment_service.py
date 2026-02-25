@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 from config.settings import settings
 from integrations.tenable_client import TenableClient
@@ -8,6 +8,7 @@ from core.recommendation_engine import RecommendationEngine
 from services.ai_narrative import AINarrativeEngine
 from models.assessment import AssessmentSummary
 
+
 class AssessmentService:
     def __init__(self):
         self.client = TenableClient()
@@ -16,13 +17,17 @@ class AssessmentService:
     def run(self) -> AssessmentSummary:
         logger.info(f"Assessment started for: {settings.CUSTOMER_NAME}")
 
-        scanners = self.client.get_scanners()
-        assets = self.client.get_assets()
-        scans = self.client.get_scans()
-        policies = self.client.get_policies()
-        tags = self.client.get_tags()
+        scanners    = self.client.get_scanners()
+        assets      = self.client.get_assets()
+        scans       = self.client.get_scans()
+        policies    = self.client.get_policies()
+        tags        = self.client.get_tags()
+        credentials = self.client.get_credentials()
+        networks    = self.client.get_networks()
 
-        findings = GapAnalyzer(scanners, assets, scans, policies, tags).run_all_checks()
+        findings = GapAnalyzer(
+            scanners, assets, scans, policies, tags, credentials, networks
+        ).run_all_checks()
 
         healthy = sum(1 for s in scanners if s.get("status") == "on" and s.get("linked"))
         scanner_health_pct = (healthy / len(scanners) * 100) if scanners else 0
@@ -32,7 +37,9 @@ class AssessmentService:
 
         metrics = {
             "authenticated_scans_pct": round(auth_pct, 1),
-            "scanner_health_pct": round(scanner_health_pct, 1),
+            "scanner_health_pct":      round(scanner_health_pct, 1),
+            "credentials_count":       len(credentials),
+            "networks_count":          len(networks),
         }
 
         score, level = MaturityEngine(findings, metrics).calculate()
@@ -41,7 +48,7 @@ class AssessmentService:
         summary = AssessmentSummary(
             customer_name=settings.CUSTOMER_NAME,
             engagement_id=settings.ENGAGEMENT_ID,
-            assessment_date=datetime.utcnow(),
+            assessment_date=datetime.now(timezone.utc),
             maturity_level=level,
             maturity_score=score,
             total_assets=len(assets),
