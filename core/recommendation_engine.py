@@ -1,8 +1,17 @@
-from models.assessment import Finding, Recommendation, Severity
+from models.assessment import Finding, Recommendation, Severity, FindingCategory
 
 PRIORITY = {Severity.CRITICAL: 1, Severity.HIGH: 2,
             Severity.MEDIUM: 3, Severity.LOW: 4}
-EFFORT_TYPE = {"low": "quick-win", "medium": "strategic", "high": "roadmap"}
+
+# Clasificación por CATEGORÍA — no por esfuerzo
+CATEGORY_TYPE = {
+    FindingCategory.SCANNER_HEALTH:      "quick-win",   # 30 días — impacto inmediato
+    FindingCategory.SCAN_POLICY:         "quick-win",   # 30 días — solo activar schedules
+    FindingCategory.CREDENTIAL_COVERAGE: "strategic",   # 60 días — requiere coordinación
+    FindingCategory.ASSET_COVERAGE:      "strategic",   # 60 días — auditoría y cleanup
+    FindingCategory.TAG_MANAGEMENT:      "roadmap",     # 90 días — taxonomía y governance
+}
+
 
 class RecommendationEngine:
     def __init__(self, findings):
@@ -23,7 +32,7 @@ class RecommendationEngine:
                 title=f"Remediate {category.value} ({len(items)} finding(s))",
                 description="\n".join(lines),
                 findings_refs=[f.id for f in items],
-                type=EFFORT_TYPE.get(top.effort, "strategic"),
+                type=CATEGORY_TYPE.get(category, "strategic"),
             ))
 
         recs.sort(key=lambda r: r.priority)
