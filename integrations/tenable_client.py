@@ -83,16 +83,53 @@ class TenableClient:
             return self._mock_scans()
         return self._get_scans_normalized()
 
+    # Templates clasificados por tipo de credencial (wizard_uuid de Tenable)
+    ALWAYS_CRED_TEMPLATES = {
+        "40345bfc-48be-37bc-9bce-526bdce37582e8fee83bcefdc746": "Credentialed Patch Audit",
+        "c3cbcd46-329f-a9ed-1077-554f8c2af33d0d44f09d736969bf": "Policy Compliance",
+    }
+    MAYBE_CRED_TEMPLATES = {
+        "731a8e52-3ea6-a291-ec0a-d2ff0619c19d7bd788d6be818b65": "Advanced Scan",
+        "e785b26c-5b4d-5da8-6643-007ea1f8ee1c8f23937a4bd45a1d": "Advanced Agent Scan",
+        "549a08c1-e5fd-c0e9-fb8f-c4336582d50ec8ffa8e5034e8da2": "MDM Scan",
+    }
+    NEVER_CRED_TEMPLATES = {
+        "bbd4f805-3966-d464-b2d1-0079eb89d69708c3a05ec2812bcf": "Host Discovery",
+        "ad629e16-03b6-8c1d-cef6-ef8c9dd3c658d24bd260ef5f9e66": "Basic Network Scan",
+        "523c833f-e434-a05f-5a52-0c0c2c160b7cd9c901634c382c2d": "Agent Scan",
+        "fc2fa8b3-028b-83e8-2ebd-4705d0de38bc621fbb0e783517bc": "Web App Scan",
+    }
+
     def _get_scans_normalized(self) -> list[dict]:
         normalized = []
+        ghost_count = 0
+        cred_count  = 0
+
         for scan in self._tvm.scans.list():
-            has_credentials = (
-                scan.get("credential_enabled", False)
-                or bool(scan.get("credentials", {}))
-                or bool(scan.get("shared_credentials", []))
-                or "credenti" in (scan.get("name", "") or "").lower()
-                or "cred" in (scan.get("type", "") or "").lower()
-            )
+            status   = scan.get("status", "")
+            wuuid    = scan.get("wizard_uuid", "") or ""
+            is_ghost = (status == "empty")
+
+            if wuuid in self.ALWAYS_CRED_TEMPLATES:
+                has_credentials  = True
+                credential_level = "guaranteed"
+            elif wuuid in self.MAYBE_CRED_TEMPLATES:
+                has_credentials  = True
+                credential_level = "possible"
+            elif wuuid in self.NEVER_CRED_TEMPLATES:
+                has_credentials  = False
+                credential_level = "none"
+            else:
+                has_credentials  = True
+                credential_level = "agent"
+
+            if is_ghost:
+                ghost_count += 1
+                has_credentials = False
+
+            if has_credentials:
+                cred_count += 1
+
             last_run = scan.get("last_modification_date") or scan.get("starttime")
             if isinstance(last_run, (int, float)) and last_run > 0:
                 last_run = datetime.fromtimestamp(last_run, tz=timezone.utc).isoformat()
@@ -101,15 +138,21 @@ class TenableClient:
                 "id":                 scan.get("id", ""),
                 "name":               scan.get("name", ""),
                 "credential_enabled": has_credentials,
+                "credential_level":   credential_level,
+                "is_ghost":           is_ghost,
+                "wizard_uuid":        wuuid,
                 "last_run":           last_run,
                 "asset_count":        scan.get("total", 0),
-                "status":             scan.get("status", ""),
+                "status":             status,
                 "enabled":            scan.get("enabled", False),
+                "has_schedule":       bool(scan.get("rrules")),
             })
 
+        active = len(normalized) - ghost_count
         logger.info(
-            f"Scans normalized: {len(normalized)} total, "
-            f"{sum(1 for s in normalized if s['credential_enabled'])} with credentials"
+            f"Scans normalized: {len(normalized)} total | "
+            f"{ghost_count} fantasmas | {active} activos | "
+            f"{cred_count} con credenciales"
         )
         return normalized
 
@@ -144,20 +187,15 @@ class TenableClient:
 
         credentials = []
         for cred in self._tvm.credentials.list():
-            # Normalizar a dict simple — pyTenable devuelve Box objects
-            cred_type = ""
-            try:
-                cred_type = str(cred.get("type", "") or "")
-            except Exception:
-                pass
             credentials.append({
-                "id":   str(cred.get("id", "") or ""),
-                "name": str(cred.get("name", "") or ""),
-                "type": cred_type,
+                "id":          cred.get("id", ""),
+                "name":        cred.get("name", ""),
+                "type":        cred.get("type", ""),
+                "description": cred.get("description", ""),
             })
         logger.info(f"GET /credentials → {len(credentials)} records")
         return credentials
-    
+
     # ------------------------------------------------------------------
     # ✅ NUEVO — Networks
     # ------------------------------------------------------------------

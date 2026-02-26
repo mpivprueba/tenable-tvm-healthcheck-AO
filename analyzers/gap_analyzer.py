@@ -80,20 +80,48 @@ class GapAnalyzer:
             )
 
     def _check_credential_coverage(self):
-        unauthenticated = [s for s in self.scans if not s.get("credential_enabled")]
-        if unauthenticated:
-            total = len(self.scans)
-            pct = round(len(unauthenticated) / total * 100, 1) if total else 0
+        # Scans fantasma — nunca han corrido (status=empty)
+        ghosts = [s for s in self.scans if s.get("is_ghost")]
+        # Scans activos sin credenciales
+        active = [s for s in self.scans if not s.get("is_ghost")]
+        unauthenticated = [s for s in active if not s.get("credential_enabled")]
+        total = len(self.scans)
+
+        # Finding 1: Scans Fantasma
+        if ghosts:
+            ghost_pct = round(len(ghosts) / total * 100, 1)
             self._add(
-                title=f"{len(unauthenticated)} Scan(s) Without Credentials",
+                title=f"{len(ghosts)} Ghost Scan(s) — Never Executed ({ghost_pct}%)",
                 category=FindingCategory.CREDENTIAL_COVERAGE,
                 severity=Severity.CRITICAL,
                 description=(
-                    f"{len(unauthenticated)} of {total} scans ({pct}%) are running "
-                    "unauthenticated. Unauthenticated scans detect only ~30% of vulnerabilities."
+                    f"{len(ghosts)} of {total} scans ({ghost_pct}%) have status 'empty' — "
+                    "they were created but have NEVER run. They consume scan slots, "
+                    "inflate the scan count, and provide zero security coverage."
+                ),
+                evidence=_truncate_evidence([s["name"] for s in ghosts], max_items=5),
+                recommendation=(
+                    "Audit and delete ghost scans. Keep only scans with an active schedule. "
+                    "Implement a scan hygiene policy: delete any scan unused for 90+ days."
+                ),
+                effort="medium"
+            )
+
+        # Finding 2: Scans activos sin credenciales
+        if unauthenticated:
+            active_total = len(active)
+            pct = round(len(unauthenticated) / active_total * 100, 1) if active_total else 0
+            self._add(
+                title=f"{len(unauthenticated)} Active Scan(s) Without Credentials",
+                category=FindingCategory.CREDENTIAL_COVERAGE,
+                severity=Severity.CRITICAL if pct > 50 else Severity.HIGH,
+                description=(
+                    f"{len(unauthenticated)} of {active_total} active scans ({pct}%) run "
+                    "unauthenticated. Unauthenticated scans detect only ~30% of vulnerabilities. "
+                    f"({len(active) - len(unauthenticated)} active scans have credentials.)"
                 ),
                 evidence=_truncate_evidence([s["name"] for s in unauthenticated], max_items=5),
-                recommendation="Configure credential sets for all internal scans.",
+                recommendation="Configure credential sets for all internal network scans.",
                 effort="high"
             )
 
@@ -117,9 +145,14 @@ class GapAnalyzer:
                 effort="medium"
             )
         else:
-            types = list({c.get("type", "Unknown") for c in self.credentials})
-            has_windows = any("windows" in c.get("type","").lower() for c in self.credentials)
-            has_ssh     = any("ssh" in c.get("type","").lower() for c in self.credentials)
+            def _ctype(c):
+                try:
+                    return str(c.get("type", "Unknown")) if hasattr(c, "get") else str(c)
+                except Exception:
+                    return "Unknown"
+            types = list({_ctype(c) for c in self.credentials})
+            has_windows = any("windows" in _ctype(c).lower() for c in self.credentials)
+            has_ssh     = any("ssh" in _ctype(c).lower() for c in self.credentials)
             missing = []
             if not has_windows:
                 missing.append("Windows")
