@@ -3,6 +3,17 @@ from loguru import logger
 from config.settings import settings
 
 
+
+def _days_since(iso_str: str | None) -> int:
+    """Returns days since an ISO datetime string, or 999 if None/invalid."""
+    if not iso_str:
+        return 999
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).days
+    except Exception:
+        return 999
+
 class TenableClient:
     def __init__(self):
         self.mock = settings.MOCK_MODE
@@ -51,28 +62,64 @@ class TenableClient:
         return scanners
 
     # ------------------------------------------------------------------
-    # Assets — paginado via pyTenable
+    # Assets — via exports.assets() para datos completos
     # ------------------------------------------------------------------
     def get_assets(self) -> list[dict]:
         if self.mock:
             return self._mock_assets()
 
-        logger.info("Fetching assets from /workbenches/assets (paginated)...")
+        logger.info("Fetching assets via exports.assets() (full data)...")
         all_assets = []
-        for asset in self._tvm.workbenches.assets():
-            fqdn = asset.get("fqdn", [])
-            ipv4 = asset.get("ipv4", [])
+        for asset in self._tvm.exports.assets(chunk_size=500):
+            # Nombre legible: fqdn > hostname > ipv4 > uuid
+            fqdns     = asset.get("fqdns", []) or []
+            hostnames = asset.get("hostnames", []) or []
+            ipv4s     = asset.get("ipv4s", []) or []
+
+            name = (
+                fqdns[0] if fqdns else
+                hostnames[0] if hostnames else
+                ipv4s[0] if ipv4s else
+                asset.get("id", "unknown")
+            )
+
+            # Source primario
+            sources = asset.get("sources", []) or []
+            source  = sources[0].get("name", "") if sources else ""
+
+            # Tags: lista de dicts {key, value}
+            tags = asset.get("tags", []) or []
+
             all_assets.append({
-                "id":        asset.get("id", ""),
-                "fqdn":      fqdn[0] if isinstance(fqdn, list) and fqdn else str(fqdn),
-                "hostname":  asset.get("hostname", [""])[0] if asset.get("hostname") else "",
-                "ipv4":      ipv4[0] if isinstance(ipv4, list) and ipv4 else str(ipv4),
-                "last_seen": asset.get("last_seen", ""),
-                "tags":      asset.get("tags", []),
+                "id":                          asset.get("id", ""),
+                "name":                        name,
+                "fqdn":                        fqdns[0] if fqdns else "",
+                "hostname":                    hostnames[0] if hostnames else "",
+                "ipv4":                        ipv4s[0] if ipv4s else "",
+                "last_seen":                   asset.get("last_seen", ""),
+                "last_scan_time":              asset.get("last_scan_time", ""),
+                "last_authenticated_scan_date":asset.get("last_authenticated_scan_date"),
+                "has_agent":                   asset.get("has_agent", False),
+                "has_plugin_results":          asset.get("has_plugin_results", False),
+                "source":                      source,
+                "acr_score":                   asset.get("acr_score"),
+                "exposure_score":              asset.get("exposure_score"),
+                "operating_systems":           asset.get("operating_systems", []) or [],
+                "tags":                        tags,
+                "network_name":               asset.get("network_name", "Default"),
+                "azure_resource_id":          asset.get("azure_resource_id"),
+                "aws_ec2_instance_id":        asset.get("aws_ec2_instance_id"),
             })
 
-        logger.info(f"Assets fetched: {len(all_assets)} (offset 0)")
-        logger.info(f"Total assets retrieved: {len(all_assets)}")
+        zombie_30  = sum(1 for a in all_assets if _days_since(a.get("last_seen")) > 30)
+        zombie_90  = sum(1 for a in all_assets if _days_since(a.get("last_seen")) > 90)
+        has_agent  = sum(1 for a in all_assets if a.get("has_agent"))
+        auth_asset = sum(1 for a in all_assets if a.get("last_authenticated_scan_date"))
+        logger.info(
+            f"Assets fetched: {len(all_assets)} total | "
+            f"{has_agent} with agent | {auth_asset} authenticated | "
+            f"{zombie_30} stale>30d | {zombie_90} zombie>90d"
+        )
         return all_assets
 
     # ------------------------------------------------------------------

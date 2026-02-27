@@ -213,30 +213,110 @@ class GapAnalyzer:
 
     def _check_asset_staleness(self):
         now = datetime.now(timezone.utc)
-        stale = []
-        for asset in self.assets:
-            last_seen = asset.get("last_seen")
-            if not last_seen:
-                continue
+
+        def days_since(iso_str):
+            if not iso_str:
+                return 999
             try:
-                last_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-                if (now - last_dt).days > 90:
-                    name = (asset.get("fqdn") or
-                            asset.get("hostname") or
-                            asset.get("ipv4") or "unknown")
-                    stale.append(name)
-            except (ValueError, TypeError):
-                continue
-        if stale:
-            pct = round(len(stale) / len(self.assets) * 100, 1)
+                return (now - datetime.fromisoformat(iso_str.replace("Z", "+00:00"))).days
+            except Exception:
+                return 999
+
+        def asset_name(a):
+            return (a.get("name") or a.get("fqdn") or
+                    a.get("hostname") or a.get("ipv4") or "unknown")
+
+        total = len(self.assets)
+
+        # Tier 1: Zombie > 90 días sin actividad
+        zombies = [a for a in self.assets if days_since(a.get("last_seen")) > 90]
+
+        # Tier 2: Stale 30-90 días
+        stale = [a for a in self.assets
+                 if 30 < days_since(a.get("last_seen")) <= 90]
+
+        # Tier 3: Cloud assets nunca escaneados
+        cloud_unscanned = [
+            a for a in self.assets
+            if a.get("source") in ("CloudDiscoveryConnector", "AWS", "AZURE", "GCP")
+            and not a.get("last_authenticated_scan_date")
+            and not a.get("has_plugin_results")
+        ]
+
+        # Tier 4: Assets sin autenticación real (last_authenticated_scan_date=None)
+        no_auth_scan = [
+            a for a in self.assets
+            if not a.get("last_authenticated_scan_date")
+            and a.get("has_plugin_results")
+        ]
+
+        if zombies:
+            pct = round(len(zombies) / total * 100, 1)
             self._add(
-                title=f"{len(stale)} Stale Assets ({pct}% of inventory)",
+                title=f"{len(zombies)} Zombie Asset(s) — No Activity >90 Days ({pct}%)",
+                category=FindingCategory.ASSET_COVERAGE,
+                severity=Severity.CRITICAL if pct > 30 else Severity.HIGH,
+                description=(
+                    f"{len(zombies)} assets ({pct}%) have not been seen in 90+ days. "
+                    "These zombie assets consume licenses without generating security value. "
+                    "They represent either decommissioned systems or coverage blind spots."
+                ),
+                evidence=_truncate_evidence([asset_name(a) for a in zombies], max_items=5),
+                recommendation=(
+                    "Enable Asset Aging policy in Tenable (Settings > General > Asset Management). "
+                    "Set auto-delete for assets not seen in 90 days. "
+                    "Review if decommissioned assets should be terminated."
+                ),
+                effort="medium"
+            )
+
+        if stale:
+            pct = round(len(stale) / total * 100, 1)
+            self._add(
+                title=f"{len(stale)} Stale Asset(s) — No Activity 30-90 Days ({pct}%)",
                 category=FindingCategory.ASSET_COVERAGE,
                 severity=Severity.MEDIUM,
-                description="Assets not seen in 90+ days may be ghost assets or coverage gaps.",
-                evidence=f"Sample: {_truncate_evidence(stale, max_items=3)}",
-                recommendation="Audit stale assets and enable asset aging policy.",
+                description=(
+                    f"{len(stale)} assets ({pct}%) have not been seen in 30-90 days. "
+                    "These may indicate intermittent connectivity or scanner coverage gaps."
+                ),
+                evidence=_truncate_evidence([asset_name(a) for a in stale], max_items=5),
+                recommendation="Verify scanner reachability for these assets. Check scan schedules.",
+                effort="low"
+            )
+
+        if cloud_unscanned:
+            self._add(
+                title=f"{len(cloud_unscanned)} Cloud Asset(s) Never Scanned",
+                category=FindingCategory.ASSET_COVERAGE,
+                severity=Severity.HIGH,
+                description=(
+                    f"{len(cloud_unscanned)} cloud assets were discovered via connector "
+                    "but have never been scanned. Cloud assets without scan results "
+                    "provide zero vulnerability intelligence."
+                ),
+                evidence=_truncate_evidence([asset_name(a) for a in cloud_unscanned], max_items=5),
+                recommendation=(
+                    "Deploy cloud-native scanners or Tenable Agents to cover cloud assets. "
+                    "Enable cloud connector scanning in Tenable Cloud Security."
+                ),
                 effort="medium"
+            )
+
+        if no_auth_scan and len(no_auth_scan) > 3:
+            pct = round(len(no_auth_scan) / total * 100, 1)
+            self._add(
+                title=f"{len(no_auth_scan)} Asset(s) Never Authenticated ({pct}%)",
+                category=FindingCategory.ASSET_COVERAGE,
+                severity=Severity.MEDIUM,
+                description=(
+                    f"{len(no_auth_scan)} assets ({pct}%) have plugin results but "
+                    "have never had a successful authenticated scan. "
+                    "Authenticated scans detect 2-3x more vulnerabilities."
+                ),
+                evidence=_truncate_evidence([asset_name(a) for a in no_auth_scan], max_items=5),
+                recommendation="Configure and enable credential scanning for these assets.",
+                effort="high"
             )
 
     def _check_asset_tagging(self):
